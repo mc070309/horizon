@@ -553,6 +553,8 @@ pub struct HudBatch {
     pub blends: Vec<(std::ops::Range<u32>, Blend)>,
     /// The textures and time of the `Blend::EndPortal` runs.
     pub end_portal: EndPortalFill,
+    /// `misc/enchanted_glint_item` and glint options for GUI item foil.
+    pub glint: GlintFill,
     /// Screen's first vertex: the preceding HUD is part of its blurred background.
     pub blur_at: u32,
 }
@@ -573,6 +575,41 @@ pub enum Blend {
     /// `RenderPipelines.END_PORTAL` as a GUI fill: the End portal's layers
     /// projected from the screen (`HudBatch::end_portal` sets the textures).
     EndPortal,
+    /// `BlendFunction.GLINT`: SRC_COLOR, ONE (colour); ONE, ZERO (alpha).
+    Glint,
+}
+/// `misc/enchanted_glint_item` in the HUD atlas and glint accessibility options.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GlintFill {
+    /// Normalized atlas rect: (u0, v0, width, height).
+    pub sprite: [f32; 4],
+    /// Wall-clock milliseconds (`Util.getMeasuringTimeMs`).
+    pub millis: f32,
+    /// `options.glintSpeed`.
+    pub speed: f32,
+    /// `options.glintStrength` / shader `GlintAlpha`.
+    pub alpha: f32,
+}
+impl GlintFill {
+    pub const SPRITE: &'static str = "misc/enchanted_glint_item";
+
+    pub fn from_options(atlas: &HudAtlas, file: &crate::options_file::OptionsFile) -> Self {
+        let speed = file.double("glintSpeed") as f32;
+        let alpha = file.double("glintStrength") as f32;
+        let sprite = atlas.sprites.get(Self::SPRITE).map_or([0.0; 4], |r| {
+            [r.u0, r.v0, r.u1 - r.u0, r.v1 - r.v0]
+        });
+        Self {
+            sprite,
+            millis: 0.0,
+            speed,
+            alpha,
+        }
+    }
+
+    pub fn active(&self) -> bool {
+        self.alpha > 0.0 && self.sprite[2] > 0.0 && self.sprite[3] > 0.0
+    }
 }
 /// What a `Blend::EndPortal` fill samples: the atlas rects (u0, v0, width,
 /// height) of `end_sky.png` and `end_portal.png`, and the `GameTime` uniform.
@@ -604,6 +641,7 @@ impl HudBatch {
             patches: Vec::new(),
             blends: Vec::new(),
             end_portal: EndPortalFill::default(),
+            glint: GlintFill::default(),
             blur_at: 0,
         }
     }
@@ -994,9 +1032,11 @@ struct HudUniform {
     size: [f32; 4],
     /// `EndPortalFill`: the two sprites, then the game time in x.
     end_portal: [[f32; 4]; 3],
+    glint_sprite: [f32; 4],
+    glint_params: [f32; 4],
 }
 impl HudUniform {
-    fn new(size: [f32; 4], fill: EndPortalFill) -> Self {
+    fn new(size: [f32; 4], fill: EndPortalFill, glint: GlintFill) -> Self {
         Self {
             size,
             end_portal: [
@@ -1004,6 +1044,8 @@ impl HudUniform {
                 fill.sprites[1],
                 [fill.game_time, 0.0, 0.0, 0.0],
             ],
+            glint_sprite: glint.sprite,
+            glint_params: [glint.millis, glint.speed, glint.alpha, 0.0],
         }
     }
 }
@@ -1015,6 +1057,7 @@ pub struct HudRenderer {
     /// `RenderPipelines.CROSSHAIR`.
     invert_pipeline: wgpu::RenderPipeline,
     additive_pipeline: wgpu::RenderPipeline,
+    glint_pipeline: wgpu::RenderPipeline,
     depth_pipeline: wgpu::RenderPipeline,
     vignette_pipeline: wgpu::RenderPipeline,
     end_portal_pipeline: wgpu::RenderPipeline,
@@ -1040,7 +1083,11 @@ impl HudRenderer {
         });
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("HUD size"),
-            contents: bytemuck::bytes_of(&HudUniform::new([1.0; 4], EndPortalFill::default())),
+            contents: bytemuck::bytes_of(&HudUniform::new(
+                [1.0; 4],
+                EndPortalFill::default(),
+                GlintFill::default(),
+            )),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1176,6 +1223,24 @@ impl HudRenderer {
             "fs_main",
             false,
         );
+        // BlendFunction.GLINT: SRC_COLOR, ONE; ONE, ZERO.
+        let glint_pipeline = create(
+            "HUD item glint",
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Src,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::Zero,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            },
+            "fs_main",
+            false,
+        );
         // RenderPipelines.VIGNETTE: ZERO, ONE_MINUS_SRC_COLOR, ZERO, ONE.
         let vignette_pipeline = create(
             "HUD vignette",
@@ -1214,6 +1279,7 @@ impl HudRenderer {
             pipeline,
             invert_pipeline,
             additive_pipeline,
+            glint_pipeline,
             depth_pipeline,
             vignette_pipeline,
             end_portal_pipeline,
@@ -1314,6 +1380,7 @@ impl HudRenderer {
             bytemuck::bytes_of(&HudUniform::new(
                 [size[0] as f32, size[1] as f32, batch.scale, 0.0],
                 batch.end_portal,
+                batch.glint,
             )),
         );
     }
@@ -1401,6 +1468,7 @@ impl HudRenderer {
                     Blend::Alpha => &self.pipeline,
                     Blend::Invert => &self.invert_pipeline,
                     Blend::Additive => &self.additive_pipeline,
+                    Blend::Glint => &self.glint_pipeline,
                     Blend::Depth(_) => &self.depth_pipeline,
                     Blend::Vignette => &self.vignette_pipeline,
                     Blend::EndPortal => &self.end_portal_pipeline,

@@ -4804,6 +4804,11 @@ impl Game<'_> {
     }
     fn hud_layers(&mut self, size: [u32; 2]) -> HudBatch {
         let mut batch = HudBatch::new(size);
+        batch.glint = horizon_client::hud::GlintFill::from_options(
+            &self.gui.atlas,
+            &self.settings.file,
+        );
+        batch.glint.millis = self.started.elapsed().as_secs_f32() * 1000.0;
         let (w, h) = (batch.width, batch.height);
         if self.screen == Screen::Win {
             self.draw_win_screen(&mut batch);

@@ -97,21 +97,9 @@ pub fn lit_color(q: &ItemQuad, lights: (Vec3, Vec3)) -> u32 {
     let c = |v: u8| (f32::from(v) * light) as u8;
     crate::hud::rgba(c(r), c(g), c(b), a)
 }
-/// The glint's moving sheen at a GUI position (a stand-in for the
-/// `GLINT_TEXTURING`-scrolled `enchanted_glint_item` texture added on top).
-fn glint_color(p: Vec2, time: f32) -> u32 {
-    let d = ((p.x + p.y) / 32.0 - time * 0.35).rem_euclid(1.0);
-    let band = (1.0 - (d - 0.5).abs() * 6.0).max(0.0);
-    crate::hud::rgba(
-        (170.0 + 70.0 * band) as u8,
-        (90.0 + 110.0 * band) as u8,
-        255,
-        (45.0 + 110.0 * band) as u8,
-    )
-}
-
-fn emit(batch: &mut HudBatch, fan: &[Point], color: impl Fn(Vec2) -> u32, glint: bool) {
+fn emit(batch: &mut HudBatch, fan: &[Point], color: u32, glint: bool) {
     let shift = if glint { 2.0 } else { 0.0 };
+    let start = batch.vertices.len();
     for i in 1..fan.len().saturating_sub(1) {
         let (a, b, c) = (fan[0], fan[i], fan[i + 1]);
         let corners = [a, b, c, c];
@@ -119,16 +107,11 @@ fn emit(batch: &mut HudBatch, fan: &[Point], color: impl Fn(Vec2) -> u32, glint:
         batch.quad(
             corners.map(|v| v.p.to_array()),
             corners.map(|v| [v.uv[0] + shift, v.uv[1]]),
-            color(a.p),
+            color,
         );
-        if glint {
-            // Per-vertex colours are flat per quad in the HUD batch: use the
-            // fan centre for the sheen.
-            let n = batch.vertices.len();
-            for v in &mut batch.vertices[n - 6..] {
-                v.color = color(Vec2::from(v.pos));
-            }
-        }
+    }
+    if glint {
+        batch.blend_since(start, crate::hud::Blend::Glint);
     }
 }
 
@@ -143,7 +126,7 @@ pub fn draw(
     batch: &mut HudBatch,
     x: f32,
     y: f32,
-    time: f32,
+    _time: f32,
 ) {
     if state.is_empty() {
         return;
@@ -167,7 +150,7 @@ pub fn draw(
     } else {
         [x, y, x + 16.0, y + 16.0]
     };
-    draw_quads(&quads, lights, batch, rect, time);
+    draw_quads(&quads, lights, batch, rect);
 }
 
 /// Lights, culls, sorts far to near and clips `quads` (GUI positions) to
@@ -177,7 +160,6 @@ fn draw_quads(
     lights: (Vec3, Vec3),
     batch: &mut HudBatch,
     rect: [f32; 4],
-    time: f32,
 ) {
     for face in depth::sort(quads) {
         let q = &quads[face.quad];
@@ -196,9 +178,9 @@ fn draw_quads(
             if fan.len() < 3 {
                 continue;
             }
-            emit(batch, &fan, |_| color, false);
-            if q.foil != Foil::None {
-                emit(batch, &fan, |p| glint_color(p, time), true);
+            emit(batch, &fan, color, false);
+            if q.foil != Foil::None && batch.glint.active() {
+                emit(batch, &fan, u32::MAX, true);
             }
         }
     }
@@ -253,7 +235,6 @@ pub fn draw_banner_result(
         items_flat_lights(),
         batch,
         [x0, y0, x0 + 20.0, y0 + 40.0],
-        0.0,
     );
 }
 
@@ -305,7 +286,6 @@ mod tests {
             (Vec3::Z, Vec3::Z),
             &mut batch,
             [0.0, 0.0, 16.0, 16.0],
-            0.0,
         );
         assert_eq!(color_at(&batch, Vec2::new(4.0, 0.5)), Some(u32::MAX));
     }
@@ -321,7 +301,6 @@ mod tests {
                 (Vec3::Z, Vec3::Z),
                 &mut batch,
                 [0.0, 0.0, 16.0, 16.0],
-                0.0,
             );
             assert_eq!(
                 color_at(&batch, Vec2::new(4.0, 2.0)),
@@ -353,7 +332,6 @@ mod tests {
             (Vec3::Z, Vec3::Z),
             &mut batch,
             [0.0, 0.0, 16.0, 16.0],
-            0.0,
         );
         for y in [0.5, 6.0] {
             assert_eq!(
