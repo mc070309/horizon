@@ -3,6 +3,18 @@ struct Hud {
     // Blend::EndPortal: atlas rects (u0, v0, width, height) of end_sky.png and
     // end_portal.png, then vanilla's GameTime in x.
     end_portal: array<vec4<f32>, 3>,
+    // misc/enchanted_glint_item in the HUD atlas: (u0, v0, width, height).
+    glint_sprite: vec4<f32>,
+    // x: wall-clock millis, y: options.glintSpeed, z: GlintAlpha (glintStrength).
+    glint_params: vec4<f32>,
+}
+fn glint_texcoord(uv: vec2<f32>, millis: f32, speed: f32) -> vec2<f32> {
+    // TextureTransform.setupGlintTexturing(8): scale 1/0.125, scroll, -50° Z.
+    let t = fract(millis * speed * 8.0 / 11000.0) * 8.0;
+    let scaled = uv * 8.0;
+    let c = cos(-0.87266463);
+    let s = sin(-0.87266463);
+    return vec2(c * scaled.x - s * scaled.y + t, s * scaled.x + c * scaled.y);
 }
 @group(0) @binding(0) var<uniform> hud: Hud;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -24,11 +36,15 @@ struct Out {
     return out;
 }
 @fragment fn fs_main(in: Out) -> @location(0) vec4<f32> {
-    // u >= 2: flat vertex colour masked by the texture's alpha (enchantment glint).
+    // u >= 2: item glint pass (item.fsh + glint.fsh, BlendFunction.GLINT).
     if in.uv.x >= 2.0 {
-        let m = textureSample(atlas, atlas_sampler, in.uv - vec2(2.0, 0.0)).a * in.color.a;
-        if m < 0.004 { discard; }
-        return vec4(in.color.rgb, m);
+        let item_uv = in.uv - vec2(2.0, 0.0);
+        let mask = textureSample(atlas, atlas_sampler, item_uv).a;
+        if mask < 0.1 { discard; }
+        let g_uv = glint_texcoord(item_uv, hud.glint_params.x, hud.glint_params.y);
+        let loc = hud.glint_sprite.xy + fract(g_uv) * hud.glint_sprite.zw;
+        let g = textureSample(atlas, atlas_sampler, loc).rgb * hud.glint_params.z;
+        return vec4(g, mask);
     }
     let c = textureSample(atlas, atlas_sampler, in.uv) * in.color;
     if c.a < 0.004 { discard; }
